@@ -1,0 +1,267 @@
+# =====================================================
+# КЛАССИФИКАЦИЯ РАСТЕНИЙ - 48 видов (исправленная версия)
+# =====================================================
+
+# ---------- 1. Установка и импорт ----------
+!pip install ultralytics -q
+!pip install kagglehub -q
+!pip install seaborn -q
+!pip install pandas -q
+
+import kagglehub
+import os
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from ultralytics import YOLO
+from sklearn.model_selection import train_test_split
+from PIL import Image
+import random
+from collections import defaultdict
+
+# ---------- 2. Скачивание датасета ----------
+print("📥 Скачиваем датасет с 48 видами растений...")
+path = kagglehub.dataset_download("developerzulkarnain/48-plant-leaves-datasets")
+print(f"✅ Датасет скачан в: {path}")
+
+# ---------- 3. Анализ реальной структуры ----------
+print("\n📊 Анализируем структуру датасета:")
+
+# Смотрим содержимое
+dataset_root = path
+print(f"\nСодержимое корневой папки:")
+for item in os.listdir(dataset_root)[:10]:
+    item_path = os.path.join(dataset_root, item)
+    if os.path.isdir(item_path):
+        print(f"  📁 {item}/")
+        # Показываем подпапки
+        for subitem in os.listdir(item_path)[:5]:
+            print(f"     📄 {subitem}")
+    else:
+        print(f"  📄 {item}")
+
+# Ищем все изображения
+print("\n🔍 Поиск изображений...")
+all_images = []
+for root, dirs, files in os.walk(dataset_root):
+    for file in files:
+        if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+            all_images.append(os.path.join(root, file))
+
+print(f"📸 Всего найдено изображений: {len(all_images)}")
+
+if len(all_images) == 0:
+    print("❌ Изображения не найдены! Возможно, датасет требует распаковки.")
+    # Пробуем найти zip архивы
+    for root, dirs, files in os.walk(dataset_root):
+        for file in files:
+            if file.endswith('.zip'):
+                print(f"📦 Найден архив: {file}")
+                print("Распаковываем...")
+                import zipfile
+                zip_path = os.path.join(root, file)
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(dataset_root)
+                print("✅ Распаковка завершена")
+    
+    # Повторный поиск изображений
+    all_images = []
+    for root, dirs, files in os.walk(dataset_root):
+        for file in files:
+            if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp')):
+                all_images.append(os.path.join(root, file))
+    print(f"📸 После распаковки найдено изображений: {len(all_images)}")
+
+# ---------- 4. Извлечение названий классов из имен файлов ----------
+print("\n🏷️ Анализируем названия классов...")
+
+# Предполагаем, что названия растений закодированы в именах файлов
+# Например: "Apple_leaf_001.jpg" или "Tomato_001.jpg"
+
+plant_classes_set = set()
+file_to_class = {}
+
+for img_path in all_images:
+    filename = os.path.basename(img_path)
+    name_without_ext = os.path.splitext(filename)[0]
+    
+    # Пробуем разные варианты извлечения названия растения
+    # Вариант 1: через подчеркивание
+    parts = name_without_ext.split('_')
+    if len(parts) > 1:
+        possible_class = parts[0]
+        plant_classes_set.add(possible_class)
+        file_to_class[img_path] = possible_class
+    else:
+        # Вариант 2: через пробел или другие разделители
+        plant_classes_set.add("unknown")
+
+# Если не удалось определить классы, ищем папки
+if len(plant_classes_set) <= 1:
+    print("⚠️ Не удалось определить классы из имен файлов. Ищем папки...")
+    plant_classes_set = set()
+    for img_path in all_images:
+        # Берем название родительской папки как класс
+        parent_folder = os.path.basename(os.path.dirname(img_path))
+        if parent_folder and parent_folder != 'versions' and parent_folder != '1':
+            plant_classes_set.add(parent_folder)
+            file_to_class[img_path] = parent_folder
+        else:
+            # Если папка не информативна, пробуем найти вложенную структуру
+            parts = img_path.split(os.sep)
+            for i, part in enumerate(parts):
+                if part in ['train', 'val', 'test', 'images'] and i+1 < len(parts):
+                    possible_class = parts[i+1]
+                    plant_classes_set.add(possible_class)
+                    file_to_class[img_path] = possible_class
+                    break
+
+plant_classes = sorted(list(plant_classes_set))
+print(f"🌿 Определено классов растений: {len(plant_classes)}")
+if len(plant_classes) > 0:
+    print(f"📋 Примеры классов: {plant_classes[:20]}")
+
+# ---------- 5. Создание структуры для YOLO ----------
+print("\n🔄 Создаем структуру данных для обучения...")
+
+# Создаем папки
+temp_dir = '/content/plant_dataset'
+os.makedirs(f'{temp_dir}/train', exist_ok=True)
+os.makedirs(f'{temp_dir}/val', exist_ok=True)
+
+# Группируем изображения по классам
+class_to_images = defaultdict(list)
+for img_path, plant_class in file_to_class.items():
+    if plant_class != "unknown":
+        class_to_images[plant_class].append(img_path)
+
+# Фильтруем классы с малым количеством изображений
+min_images_per_class = 5
+filtered_classes = {}
+for plant_class, images in class_to_images.items():
+    if len(images) >= min_images_per_class:
+        filtered_classes[plant_class] = images
+
+print(f"\n📊 Классов с >= {min_images_per_class} изображений: {len(filtered_classes)}")
+
+# Показываем статистику по классам
+class_sizes = {cls: len(images) for cls, images in filtered_classes.items()}
+print(f"\n📈 Статистика:")
+print(f"  Максимум изображений в классе: {max(class_sizes.values())}")
+print(f"  Минимум: {min(class_sizes.values())}")
+print(f"  Среднее: {np.mean(list(class_sizes.values())):.0f}")
+print(f"  Медиана: {np.median(list(class_sizes.values())):.0f}")
+
+# Визуализируем распределение
+if len(class_sizes) > 0:
+    plt.figure(figsize=(15, 6))
+    classes = list(class_sizes.keys())[:30]
+    sizes = [class_sizes[cls] for cls in classes]
+    plt.bar(classes, sizes)
+    plt.xticks(rotation=45, ha='right', fontsize=8)
+    plt.title('Распределение изображений по классам (первые 30)')
+    plt.xlabel('Классы растений')
+    plt.ylabel('Количество изображений')
+    plt.tight_layout()
+    plt.savefig('/content/class_distribution.png')
+    plt.show()
+
+# ---------- 6. Разделение на train/val и копирование файлов ----------
+print("\n📂 Копируем файлы в нужную структуру...")
+
+for plant_class, images in filtered_classes.items():
+    # Создаем папки для класса
+    os.makedirs(f'{temp_dir}/train/{plant_class}', exist_ok=True)
+    os.makedirs(f'{temp_dir}/val/{plant_class}', exist_ok=True)
+    
+    # Разделяем на train (80%) и val (20%)
+    train_imgs, val_imgs = train_test_split(images, test_size=0.2, random_state=42)
+    
+    # Копируем train изображения
+    for img_path in train_imgs:
+        filename = os.path.basename(img_path)
+        dst = os.path.join(temp_dir, 'train', plant_class, filename)
+        shutil.copy2(img_path, dst)
+    
+    # Копируем val изображения
+    for img_path in val_imgs:
+        filename = os.path.basename(img_path)
+        dst = os.path.join(temp_dir, 'val', plant_class, filename)
+        shutil.copy2(img_path, dst)
+    
+    print(f"  {plant_class}: train={len(train_imgs)}, val={len(val_imgs)}")
+
+# ---------- 7. Проверка итоговой структуры ----------
+print("\n✅ Проверка подготовленных данных:")
+
+train_classes = len(os.listdir(f'{temp_dir}/train'))
+val_classes = len(os.listdir(f'{temp_dir}/val'))
+
+train_total = 0
+for cls in os.listdir(f'{temp_dir}/train'):
+    cls_path = os.path.join(f'{temp_dir}/train', cls)
+    train_total += len([f for f in os.listdir(cls_path) if f.endswith(('.jpg', '.jpeg', '.png'))])
+
+val_total = 0
+for cls in os.listdir(f'{temp_dir}/val'):
+    cls_path = os.path.join(f'{temp_dir}/val', cls)
+    val_total += len([f for f in os.listdir(cls_path) if f.endswith(('.jpg', '.jpeg', '.png'))])
+
+print(f"📊 Train: {train_total} изображений, {train_classes} классов")
+print(f"📊 Val: {val_total} изображений, {val_classes} классов")
+
+if train_total == 0:
+    print("\n❌ ОШИБКА: Нет данных для обучения!")
+    print("Возможные причины:")
+    print("1. Датасет поврежден или имеет другую структуру")
+    print("2. Изображения находятся в другом месте")
+    print("\nРучная проверка:")
+    !ls -la {path}
+else:
+    # ---------- 8. Обучение модели ----------
+    print("\n🏗️ Начинаем обучение модели...")
+    
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"🖥️ Устройство: {device.upper()}")
+    
+    # Загружаем модель
+    model = YOLO('yolov8n-cls.pt')
+    
+    # Обучаем
+    results = model.train(
+        data=temp_dir,
+        epochs=30,  # Начните с 30 эпох для теста
+        imgsz=224,
+        batch=32 if device == 'cuda' else 16,
+        device=device,
+        workers=4,
+        patience=10,
+        project='plant_classification',
+        name='48_plants_model',
+        exist_ok=True,
+        pretrained=True,
+        verbose=True
+    )
+    
+    # ---------- 9. Сохранение результатов ----------
+    print("\n💾 Сохраняем результаты...")
+    
+    # Список классов
+    with open('/content/plant_classes.txt', 'w') as f:
+        for cls in sorted(filtered_classes.keys()):
+            f.write(f"{cls}\n")
+    
+    # Лучшая модель
+    best_model_path = '/content/plant_classification/48_plants_model/weights/best.pt'
+    if os.path.exists(best_model_path):
+        shutil.copy(best_model_path, '/content/best_plant_model.pt')
+        print("✅ Модель сохранена как best_plant_model.pt")
+    
+    print("\n" + "="*60)
+    print("🎉 ПОДГОТОВКА ЗАВЕРШЕНА!")
+    print("="*60)
+    print(f"\n📁 Данные для обучения: {temp_dir}")
+    print(f"🤖 Лучшая модель: best_plant_model.pt")
+    print(f"📋 Список классов: plant_classes.txt")
