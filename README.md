@@ -48,3 +48,4 @@
 git clone https://github.com/your-username/plant-classification.git
 cd plant-classification
 pip install -r requirements.txt
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/YOUR_USERNAME/plant-classification/blob/main/train.ipynb)
