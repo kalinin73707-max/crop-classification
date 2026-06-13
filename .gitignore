@@ -1,0 +1,22 @@
+# Модели (большие файлы)
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Результаты обучения
+/runs/
+/plant_classification/
+
+# Данные
+dataset/
+plant_dataset/
+plant_dataset_48/
+
+# Временные файлы
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Кеш
+.cache/
